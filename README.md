@@ -28,6 +28,28 @@ Clicker game with a spammy remote? Set `rateLimit = { 200, 1 }`. Per remote, you
 
 Legit teleports (spawns, portals): `Aegis.teleport(player, cframe)` — raw CFrame sets get flagged. Shots: `Aegis.reportShot(player, direction)` feeds the aimbot guard.
 
+Weapons (infinite ammo / instant reload die here):
+
+```lua
+Aegis.registerWeapon(player, { magSize = 30, fireInterval = 0.12, reloadTime = 2 })
+-- in your fire code:
+if Aegis.tryFire(player) then
+    -- actually fire
+end
+-- in your reload code:
+Aegis.reloadWeapon(player)
+```
+
+Melee / kill-aura check:
+
+```lua
+if Aegis.validateHit(player, targetPosition, 12) then
+    -- apply damage
+end
+```
+
+Exempt staff and testers: `Aegis.trust(player)`. Tuning a new game? Start with `Aegis.init({ auditOnly = true })` — everything gets logged, nothing gets kicked, until your thresholds are dialed in.
+
 ## Config
 
 One table at the top of the file, documented in the index header. The knobs you'll actually touch: `kickOnDetect`, `flagThreshold`, per-remote `rateLimit`, `movement.baseSpeed`. Aimbot guard is flag-only on purpose — good players look suspicious to bad heuristics.
@@ -38,7 +60,12 @@ One table at the top of the file, documented in the index header. The knobs you'
 - **MovementGuard** — displacement-based. Speed, teleport, TweenService, PivotTo — all move the character, one check catches them
 - **NoclipGuard** — path raycasts + inside-geometry checks
 - **AimbotGuard** — snap detection, tracking consistency, flag-only
+- **CombatGuard** — server-side ammo, fire-rate, reload timers, trigger-bot consistency (warn-only)
+- **HitValidator** — kill-aura range checks
+- **SessionGuard** — server-side AFK tracking (server kicks can't be hooked by anti-kick)
 - **Logger** — strikes, kicks, optional Discord webhook
+
+Physics-based checks (movement, noclip, remotes, hits) can't false-positive on skill — a pro player doesn't move faster than physics allows. Only the statistical heuristics (aimbot, fire consistency) can look suspicious, and those never kick, only log.
 
 ## License
 

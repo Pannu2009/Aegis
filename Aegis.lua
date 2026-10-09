@@ -3,14 +3,21 @@
 --// Built by Dakait — https://dakait.lol
 --//
 --// INDEX (top to bottom):
---//   Config ........... kick policy, remote defaults, per-remote overrides,
---//                      movement / noclip / aimbot tuning
+--//   Config ........... kick policy, audit mode, remote defaults,
+--//                      per-remote overrides, guard tuning
 --//   Logger ........... flag() strikes, warn() log-only, kick(), discord webhook
+--//   Trust ............ Aegis.trust(): exempt staff/testers from all guards
 --//   AimbotGuard ...... trackShot(): snap angles + tracking consistency, flag-only
+--//   SessionGuard ..... server-side AFK tracking (server kicks can't be hooked)
 --//   RemoteValidator .. secure(): arg types, rate limits, arg size caps
 --//   MovementGuard .... displacement checks: speed, teleport, tween, pivot
 --//   NoclipGuard ...... path raycasts + inside-geometry checks
---//   Public API ....... Aegis.init / configure / secure / teleport / reportShot
+--//   CombatGuard ...... registerWeapon/tryFire/reloadWeapon: server-side ammo,
+--//                      fire-rate, reload timers, trigger-bot check (warn-only)
+--//   HitValidator ..... validateHit(): kill-aura range checks
+--//   Public API ....... init / configure / secure / teleport / reportShot /
+--//                      trust / untrust / registerWeapon / tryFire /
+--//                      reloadWeapon / validateHit / ping
 --//
 --// Install: paste this whole file into a ModuleScript named "Aegis".
 --// Usage:
@@ -30,6 +37,7 @@ local Config = {
 	kickOnDetect = true,
 	flagThreshold = 3,
 	discordWebhook = "",
+	auditOnly = false,
 
 	remoteDefaults = {
 		rateLimit = { 20, 1 },
@@ -56,6 +64,18 @@ local Config = {
 		enabled = true,
 		maxSnapDegrees = 100,
 		flagOnly = true,
+	},
+
+	session = {
+		enabled = true,
+		maxIdle = 900,
+		checkInterval = 30,
+	},
+
+	combat = {
+		enabled = true,
+		consistencyWindow = 10,
+		consistencyTolerance = 0.05,
 	},
 }
 
@@ -95,6 +115,10 @@ function Logger.flag(player, category, detail)
 		detail or "",
 		count
 	))
+	if Config.auditOnly then
+		Logger.log("AUDIT (no action): " .. category .. " / " .. player.Name)
+		return count
+	end
 	if Config.kickOnDetect and count >= Config.flagThreshold then
 		Logger.kick(player, "Aegis: " .. category)
 	end
@@ -125,6 +149,14 @@ function Logger.clear(player)
 	end
 end
 
+--// TRUST
+
+local trusted = {}
+
+local function isTrusted(player)
+	return trusted[player.UserId] == true
+end
+
 --// AIMBOT GUARD
 
 local AimbotGuard = {}
@@ -137,6 +169,9 @@ end
 
 function AimbotGuard.trackShot(player, aimDir)
 	if not Config.aimbot.enabled then
+		return
+	end
+	if isTrusted(player) then
 		return
 	end
 	if typeof(aimDir) ~= "Vector3" or aimDir.Magnitude < 0.001 then
@@ -182,6 +217,45 @@ function AimbotGuard.trackShot(player, aimDir)
 			aimHistory[uid] = {}
 		end
 	end
+end
+
+--// SESSION GUARD
+
+local SessionGuard = {}
+local activity = {}
+
+function SessionGuard.ping(player)
+	activity[player.UserId] = os.clock()
+end
+
+function SessionGuard.start()
+	local cfg = Config.session
+	if not cfg.enabled then
+		return
+	end
+	for _, player in ipairs(Players:GetPlayers()) do
+		activity[player.UserId] = os.clock()
+	end
+	Players.PlayerAdded:Connect(function(player)
+		activity[player.UserId] = os.clock()
+	end)
+	Players.PlayerRemoving:Connect(function(player)
+		activity[player.UserId] = nil
+	end)
+	task.spawn(function()
+		while true do
+			task.wait(cfg.checkInterval)
+			local now = os.clock()
+			for _, player in ipairs(Players:GetPlayers()) do
+				if not isTrusted(player) then
+					local lastActive = activity[player.UserId] or now
+					if now - lastActive > cfg.maxIdle then
+						Logger.kick(player, "Aegis: idle too long")
+					end
+				end
+			end
+		end
+	end)
 end
 
 --// REMOTE VALIDATOR
@@ -261,6 +335,14 @@ function RemoteValidator.secure(remote, schemaOverride, handler)
 	local schema = resolveSchema(remote, schemaOverride)
 
 	remote.OnServerEvent:Connect(function(player, ...)
+		if isTrusted(player) then
+			local okT, errT = pcall(handler, player, ...)
+			if not okT then
+				Logger.log("handler error in " .. remote.Name .. ": " .. tostring(errT))
+			end
+			return
+		end
+
 		local args = { ... }
 
 		if not rateOk(player, remote.Name, schema.rateLimit) then
@@ -306,6 +388,8 @@ function RemoteValidator.secure(remote, schemaOverride, handler)
 			end
 		end
 
+		SessionGuard.ping(player)
+
 		local ok, err = pcall(handler, player, ...)
 		if not ok then
 			Logger.log("handler error in " .. remote.Name .. ": " .. tostring(err))
@@ -346,7 +430,7 @@ function MovementGuard.checkAll(cfg)
 		local character = player.Character
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
 		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if hrp and humanoid and humanoid.Health > 0 then
+		if not isTrusted(player) and hrp and humanoid and humanoid.Health > 0 then
 			local uid = player.UserId
 			local pos = hrp.Position
 
@@ -425,7 +509,7 @@ function NoclipGuard.checkAll(cfg)
 		local character = player.Character
 		local hrp = character and character:FindFirstChild("HumanoidRootPart")
 		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		if hrp and humanoid and humanoid.Health > 0 then
+		if not isTrusted(player) and hrp and humanoid and humanoid.Health > 0 then
 			local uid = player.UserId
 			local pos = hrp.Position
 
@@ -465,6 +549,139 @@ function NoclipGuard.checkAll(cfg)
 	end
 end
 
+--// COMBAT GUARD
+
+local CombatGuard = {}
+local loadouts = {}
+
+function CombatGuard.start()
+	Players.PlayerRemoving:Connect(function(player)
+		loadouts[player.UserId] = nil
+	end)
+end
+
+function CombatGuard.register(player, spec)
+	assert(
+		spec.magSize and spec.fireInterval and spec.reloadTime,
+		"registerWeapon: spec needs magSize, fireInterval, reloadTime"
+	)
+	loadouts[player.UserId] = {
+		ammo = spec.magSize,
+		magSize = spec.magSize,
+		fireInterval = spec.fireInterval,
+		reloadTime = spec.reloadTime,
+		lastShot = 0,
+		reloadEnd = 0,
+		reloading = false,
+		intervals = {},
+	}
+end
+
+function CombatGuard.tryFire(player)
+	if isTrusted(player) then
+		return true
+	end
+	local w = loadouts[player.UserId]
+	if not w then
+		return true
+	end
+	local now = os.clock()
+	if w.reloading then
+		if now >= w.reloadEnd then
+			w.ammo = w.magSize
+			w.reloading = false
+		else
+			return false
+		end
+	end
+	if w.ammo <= 0 then
+		Logger.flag(player, "combat", "fired with empty mag")
+		return false
+	end
+	local interval = now - w.lastShot
+	if w.lastShot > 0 and interval < w.fireInterval * 0.9 then
+		Logger.flag(
+			player,
+			"combat",
+			string.format("fire-rate %.3fs < %.3fs", interval, w.fireInterval)
+		)
+		return false
+	end
+	w.ammo -= 1
+	if w.lastShot > 0 then
+		table.insert(w.intervals, interval)
+		if #w.intervals > Config.combat.consistencyWindow then
+			table.remove(w.intervals, 1)
+		end
+		if #w.intervals >= Config.combat.consistencyWindow then
+			local avg = 0
+			for _, v in ipairs(w.intervals) do
+				avg += v
+			end
+			avg /= #w.intervals
+			local consistent = avg > 0.01
+			if consistent then
+				for _, v in ipairs(w.intervals) do
+					if math.abs(v - avg) / avg > Config.combat.consistencyTolerance then
+						consistent = false
+						break
+					end
+				end
+			end
+			if consistent then
+				Logger.warn(player, "combat", "inhuman fire consistency")
+				w.intervals = {}
+			end
+		end
+	end
+	w.lastShot = now
+	return true
+end
+
+function CombatGuard.reload(player)
+	if isTrusted(player) then
+		return
+	end
+	local w = loadouts[player.UserId]
+	if not w then
+		return
+	end
+	if w.reloading then
+		Logger.flag(player, "combat", "reload timer skipped")
+		return
+	end
+	w.reloading = true
+	w.reloadEnd = os.clock() + w.reloadTime
+end
+
+--// HIT VALIDATOR
+
+local HitValidator = {}
+
+function HitValidator.validate(player, targetPosition, maxRange)
+	if isTrusted(player) then
+		return true
+	end
+	if typeof(targetPosition) ~= "Vector3" or typeof(maxRange) ~= "number" then
+		return false
+	end
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return false
+	end
+	local dist = (hrp.Position - targetPosition).Magnitude
+	if dist > maxRange then
+		Logger.flag(
+			player,
+			"kill-aura",
+			string.format("hit at %.1f (max %.1f)", dist, maxRange)
+		)
+		return false
+	end
+	return true
+end
+
 --// PUBLIC API
 
 local started = false
@@ -492,6 +709,8 @@ function Aegis.init(options)
 	Aegis.configure(options)
 	MovementGuard.start()
 	NoclipGuard.start()
+	SessionGuard.start()
+	CombatGuard.start()
 	Logger.log("Aegis v0.1 initialized")
 	return Aegis
 end
@@ -520,6 +739,39 @@ end
 function Aegis.reportShot(player, aimDirection)
 	ensureStarted()
 	AimbotGuard.trackShot(player, aimDirection)
+end
+
+function Aegis.trust(player)
+	trusted[player.UserId] = true
+end
+
+function Aegis.untrust(player)
+	trusted[player.UserId] = nil
+end
+
+function Aegis.registerWeapon(player, spec)
+	ensureStarted()
+	CombatGuard.register(player, spec)
+end
+
+function Aegis.tryFire(player)
+	ensureStarted()
+	return CombatGuard.tryFire(player)
+end
+
+function Aegis.reloadWeapon(player)
+	ensureStarted()
+	CombatGuard.reload(player)
+end
+
+function Aegis.validateHit(player, targetPosition, maxRange)
+	ensureStarted()
+	return HitValidator.validate(player, targetPosition, maxRange)
+end
+
+function Aegis.ping(player)
+	ensureStarted()
+	SessionGuard.ping(player)
 end
 
 Aegis.Config = Config
