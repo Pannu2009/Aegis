@@ -612,6 +612,9 @@ function CombatGuard.register(player, spec)
 end
 
 function CombatGuard.tryFire(player)
+	if not Config.combat.enabled then
+		return true
+	end
 	if isTrusted(player) then
 		return true
 	end
@@ -673,6 +676,9 @@ function CombatGuard.tryFire(player)
 end
 
 function CombatGuard.reload(player)
+	if not Config.combat.enabled then
+		return
+	end
 	if isTrusted(player) then
 		return
 	end
@@ -813,11 +819,12 @@ function InventoryGuard.get(player)
 end
 
 function InventoryGuard.has(player, itemId, amount)
-	return (getInv(player)[itemId] or 0) >= (amount or 1)
+	amount = math.max(1, math.floor(amount or 1))
+	return (getInv(player)[itemId] or 0) >= amount
 end
 
 function InventoryGuard.give(player, itemId, amount)
-	amount = amount or 1
+	amount = math.max(1, math.floor(amount or 1))
 	return withLock({ player.UserId }, function()
 		local inv = getInv(player)
 		inv[itemId] = (inv[itemId] or 0) + amount
@@ -827,7 +834,7 @@ function InventoryGuard.give(player, itemId, amount)
 end
 
 function InventoryGuard.take(player, itemId, amount)
-	amount = amount or 1
+	amount = math.max(1, math.floor(amount or 1))
 	return withLock({ player.UserId }, function()
 		local inv = getInv(player)
 		if (inv[itemId] or 0) < amount then
@@ -843,7 +850,7 @@ function InventoryGuard.take(player, itemId, amount)
 end
 
 function InventoryGuard.trade(fromPlayer, toPlayer, itemId, amount)
-	amount = amount or 1
+	amount = math.max(1, math.floor(amount or 1))
 	local first, second = fromPlayer, toPlayer
 	if fromPlayer.UserId > toPlayer.UserId then
 		first, second = toPlayer, fromPlayer

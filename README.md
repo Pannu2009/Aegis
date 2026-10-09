@@ -50,6 +50,8 @@ end
 
 Exempt staff and testers: `Aegis.trust(player)`. Tuning a new game? Start with `Aegis.init({ auditOnly = true })` — everything gets logged, nothing gets kicked, until your thresholds are dialed in.
 
+Note: AFK pings fire on every validated remote call. If your game has no secured remotes, call `Aegis.ping(player)` in your game loop — otherwise active players get AFK-kicked.
+
 ## Config
 
 One table at the top of the file, documented in the index header. The knobs you'll actually touch: `kickOnDetect`, `flagThreshold`, per-remote `rateLimit`, `movement.baseSpeed`. Aimbot guard is flag-only on purpose — good players look suspicious to bad heuristics.
