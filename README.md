@@ -14,7 +14,7 @@ Core principle: **never trust the client.** Validate everything on the server.
 
 **Option A — Creator Store (easiest):** search `Aegis` in the Toolbox, insert into `ServerScriptService`.
 
-**Option B — GitHub:** create a ModuleScript named `Aegis` in `ServerScriptService`, paste `src/init.lua`, then create child ModuleScripts named `Config`, `Logger`, `RemoteValidator`, `MovementGuard`, `NoclipGuard`, `AimbotGuard` and paste each matching file.
+**Option B — GitHub:** create one ModuleScript named `Aegis` in `ServerScriptService`, open `Aegis.lua` from this repo, paste the entire file. Done — one module, no children, no setup.
 
 ## Quickstart
 
@@ -61,15 +61,17 @@ Aegis.configure({
 })
 ```
 
-## Modules
+## What's inside
 
-| Module | Catches |
+One file, five guards:
+
+| Guard | Catches |
 |---|---|
-| `RemoteValidator` | Remote spam, malformed args, oversized payloads (server crashers), type confusion |
-| `MovementGuard` | Speed hacks, teleports, TweenService abuse, PivotTo abuse — displacement-based, so the method doesn't matter |
-| `NoclipGuard` | Noclip via path raycasts + inside-geometry checks |
-| `AimbotGuard` | Aim snap + inhuman tracking consistency (flag-only by design — good players look suspicious) |
-| `Logger` | Strikes, kicks, Discord webhook alerts |
+| RemoteValidator | Remote spam, malformed args, oversized payloads (server crashers), type confusion |
+| MovementGuard | Speed hacks, teleports, TweenService abuse, PivotTo abuse — displacement-based, so the method doesn't matter |
+| NoclipGuard | Noclip via path raycasts + inside-geometry checks |
+| AimbotGuard | Aim snap + inhuman tracking consistency (flag-only by design — good players look suspicious) |
+| Logger | Strikes, kicks, Discord webhook alerts |
 
 ## Configuration
 
