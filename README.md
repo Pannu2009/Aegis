@@ -74,7 +74,6 @@ Physics-based checks (movement, noclip, remotes, hits) can't false-positive on s
 
 **2026-10-09 ~12:05 PDT** — v0.2: InventoryGuard (dupe-proof atomic transactions), ShopGuard (server-side prices), BehaviorGuard (auto-farm detection)
 **2026-10-09 ~11:50 PDT** — CombatGuard, HitValidator, SessionGuard. Trust list, audit mode, strike thresholds
-**2026-10-09 ~11:35 PDT** — Single-file edition. Index-only header, no inline comments. README rewritten
 **2026-10-09 ~11:20 PDT** — First release: RemoteValidator, MovementGuard, NoclipGuard, AimbotGuard
 
 ## License
