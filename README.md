@@ -1,98 +1,50 @@
 # Aegis
 
-Open-source anti-exploit kit for Roblox games. Server-side validation for remotes, movement, noclip, and aimbots — drop it in, configure it, stop trusting the client.
+Server-side anti-exploit kit for Roblox. One module, drop it in, stop trusting the client.
 
-Built by [Arzh](https://dakait.lol/portfolio). Battle-tested patterns from real anti-exploit work shipping in live games.
-
-## Why
-
-Most Roblox exploit defenses are either closed-source black boxes or scattered forum snippets. Aegis is neither: every line is readable, every check runs on the server where exploiters can't touch it, and integration takes five minutes.
-
-Core principle: **never trust the client.** Validate everything on the server.
+I built this because every anti-cheat I found was either a closed black box or forum snippets that break in a week. These are patterns that actually work — remote validation, movement checks, noclip detection — all on the server where exploiters can't reach them.
 
 ## Install
 
-**Option A — Creator Store (easiest):** search `Aegis` in the Toolbox, insert into `ServerScriptService`.
+**Toolbox:** search `Aegis`, insert into `ServerScriptService`.
 
-**Option B — GitHub:** create one ModuleScript named `Aegis` in `ServerScriptService`, open `Aegis.lua` from this repo, paste the entire file. Done — one module, no children, no setup.
+**Manual:** one ModuleScript named `Aegis` in `ServerScriptService`, paste all of `Aegis.lua`. Done.
 
-## Quickstart
+## Use
 
 ```lua
 local Aegis = require(game.ServerScriptService.Aegis)
+Aegis.init()
 
-Aegis.init({
-    kickOnDetect = true,
-    discordWebhook = "YOUR_WEBHOOK", -- optional: flags/kicks posted here
-})
-
--- Wrap a RemoteEvent with validation. Invalid calls never reach your logic.
 Aegis.secure(game.ReplicatedStorage.HitZombie, {
-    args = { "number", "Instance" }, -- expected arg types
-    rateLimit = { 20, 1 },            -- max 20 calls/sec per player
+    args = { "number", "Instance" },
+    rateLimit = { 20, 1 },
 }, function(player, damage, zombie)
-    -- your handler
+    -- only runs if validation passed
 end)
-
--- Clicker game with a high-frequency remote? Crank the limit.
-Aegis.secure(game.ReplicatedStorage.Click, {
-    args = {},
-    rateLimit = { 200, 1 },
-}, function(player)
-    -- your handler
-end)
-
--- Legitimate teleports (spawns, portals) go through Aegis, not raw CFrame sets.
-Aegis.teleport(player, CFrame.new(0, 10, 0))
-
--- Feed shots to the aimbot guard from your weapon code.
-Aegis.reportShot(player, aimDirection)
 ```
 
-Or set per-remote rules centrally:
+Clicker game with a spammy remote? Set `rateLimit = { 200, 1 }`. Per remote, your call.
 
-```lua
-Aegis.configure({
-    remotes = {
-        ClickButton = { rateLimit = { 200, 1 } },
-        BuyItem = { args = { "string", "number" }, rateLimit = { 5, 1 } },
-    },
-    movement = { baseSpeed = 24 }, -- your game is faster than default
-})
-```
+Legit teleports (spawns, portals): `Aegis.teleport(player, cframe)` — raw CFrame sets get flagged. Shots: `Aegis.reportShot(player, direction)` feeds the aimbot guard.
 
-## What's inside
+## Config
 
-One file, five guards:
+One table at the top of the file, documented in the index header. The knobs you'll actually touch: `kickOnDetect`, `flagThreshold`, per-remote `rateLimit`, `movement.baseSpeed`. Aimbot guard is flag-only on purpose — good players look suspicious to bad heuristics.
 
-| Guard | Catches |
-|---|---|
-| RemoteValidator | Remote spam, malformed args, oversized payloads (server crashers), type confusion |
-| MovementGuard | Speed hacks, teleports, TweenService abuse, PivotTo abuse — displacement-based, so the method doesn't matter |
-| NoclipGuard | Noclip via path raycasts + inside-geometry checks |
-| AimbotGuard | Aim snap + inhuman tracking consistency (flag-only by design — good players look suspicious) |
-| Logger | Strikes, kicks, Discord webhook alerts |
+## Inside
 
-## Configuration
-
-All defaults live in `Config.lua`. Key knobs:
-
-- `kickOnDetect` / `flagThreshold` — kick after N strikes in a category
-- `remoteDefaults.rateLimit` / `maxArgSize` — global remote policy
-- `remotes` — per-RemoteEvent overrides (the clicker-game case)
-- `movement.baseSpeed` / `tolerance` — tune to your game's movement
-- `aimbot.flagOnly` — keep `true`; statistical detection should never auto-kick
-
-## Roadmap
-
-- **v0.2** — `CombatGuard` (server-authoritative ammo, fire-rate, reload timing, trigger-bot heuristics), `HitValidator` (kill-aura distance checks, canonical hitbox sizes), `SessionGuard` (server-side kicks that anti-kick can't block, server-side AFK tracking)
-- **v0.3** — `InventoryGuard` (dupe-proof server-authoritative transactions), `ShopGuard` (server-side prices and balances — purchase bypasses die here), `BehaviorGuard` (auto-farm timing heuristics)
-- **Guides** — replication hygiene vs. instance-tree scraping (what you can't stop, what you can starve)
-
-## Contributing
-
-PRs welcome. Keep modules under 1,000 lines, server-side only, no trust in the client — ever.
+- **RemoteValidator** — arg types, rate limits, oversized payloads (the stuff that crashes servers)
+- **MovementGuard** — displacement-based. Speed, teleport, TweenService, PivotTo — all move the character, one check catches them
+- **NoclipGuard** — path raycasts + inside-geometry checks
+- **AimbotGuard** — snap detection, tracking consistency, flag-only
+- **Logger** — strikes, kicks, optional Discord webhook
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. Do what you want with it.
+
+---
+**Dakait** — [dakait.lol](https://dakait.lol)
+
+I also build [Dakarún](https://dakait.lol), a Lua obfuscator for Roblox scripts.

@@ -1,16 +1,22 @@
---// =====================================================================
 --// Aegis v0.1 — open-source anti-exploit kit for Roblox games.
+--// One ModuleScript in ServerScriptService. MIT License.
+--// Built by Dakait — https://dakait.lol
 --//
---// SINGLE-FILE EDITION. Drop this entire file into ONE ModuleScript
---// named "Aegis" in ServerScriptService. No child modules needed.
+--// INDEX (top to bottom):
+--//   Config ........... kick policy, remote defaults, per-remote overrides,
+--//                      movement / noclip / aimbot tuning
+--//   Logger ........... flag() strikes, warn() log-only, kick(), discord webhook
+--//   AimbotGuard ...... trackShot(): snap angles + tracking consistency, flag-only
+--//   RemoteValidator .. secure(): arg types, rate limits, arg size caps
+--//   MovementGuard .... displacement checks: speed, teleport, tween, pivot
+--//   NoclipGuard ...... path raycasts + inside-geometry checks
+--//   Public API ....... Aegis.init / configure / secure / teleport / reportShot
 --//
+--// Install: paste this whole file into a ModuleScript named "Aegis".
+--// Usage:
 --//   local Aegis = require(game.ServerScriptService.Aegis)
 --//   Aegis.init()
---//   Aegis.secure(remote, { args = {"number"} }, handler)
---//
---// Built by Arzh. https://github.com/Pannu2009/Aegis
---// MIT License.
---// =====================================================================
+--//   Aegis.secure(remote, { args = {"number"} }, function(player, ...) end)
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -18,58 +24,45 @@ local HttpService = game:GetService("HttpService")
 
 local Aegis = {}
 
---// ============================== CONFIG ==============================
+--// CONFIG
 
 local Config = {
 	kickOnDetect = true,
-	flagThreshold = 3, -- strikes in a category before auto-kick
-	discordWebhook = "", -- optional: flags/kicks posted here
+	flagThreshold = 3,
+	discordWebhook = "",
 
-	-- Defaults applied to every secured remote unless overridden.
 	remoteDefaults = {
-		rateLimit = { 20, 1 }, -- 20 calls per second per player
-		maxArgSize = 2048, -- max string length / table entries per arg
+		rateLimit = { 20, 1 },
+		maxArgSize = 2048,
 	},
 
-	-- Per-remote overrides, keyed by RemoteEvent name.
-	-- Example (clicker game with a high-frequency remote):
-	--   remotes = {
-	--     ClickButton = { rateLimit = { 200, 1 } },
-	--     BuyItem     = { args = { "string", "number" }, rateLimit = { 5, 1 } },
-	--   },
 	remotes = {},
 
-	-- Catches speed hacks, teleports, TweenService and PivotTo abuse.
-	-- All movement methods change position; displacement catches them all.
 	movement = {
 		enabled = true,
-		baseSpeed = 16, -- studs/sec; raise for games with faster movement
-		tolerance = 1.3, -- multiplier for lag compensation
+		baseSpeed = 16,
+		tolerance = 1.3,
 		checkInterval = 0.2,
-		ignoreSeated = true, -- skip players in vehicles/seats
+		ignoreSeated = true,
 	},
 
-	-- Catches noclip via path raycasts + inside-geometry checks.
 	noclip = {
 		enabled = true,
 		checkInterval = 0.5,
 		ignoreSeated = true,
 	},
 
-	-- Statistical aimbot detection. Flag-only by design: good players
-	-- look suspicious to naive heuristics.
 	aimbot = {
 		enabled = true,
-		maxSnapDegrees = 100, -- max aim-angle change between consecutive shots
-		flagOnly = true, -- never auto-kick; log + flag for review
+		maxSnapDegrees = 100,
+		flagOnly = true,
 	},
 }
 
---// ============================== LOGGER ==============================
--- Flags, strikes, kicks, optional Discord webhook.
+--// LOGGER
 
 local Logger = {}
-local strikes = {} -- ["userId:category"] = count
+local strikes = {}
 
 local function sendWebhook(message)
 	if Config.discordWebhook == "" then
@@ -90,7 +83,6 @@ function Logger.log(message)
 	sendWebhook(message)
 end
 
--- Records a strike. Kicks when the category hits flagThreshold.
 function Logger.flag(player, category, detail)
 	local key = player.UserId .. ":" .. category
 	strikes[key] = (strikes[key] or 0) + 1
@@ -109,8 +101,6 @@ function Logger.flag(player, category, detail)
 	return count
 end
 
--- Log-only, no strike. Used by heuristic guards (aimbot) to avoid
--- punishing legitimately skilled players.
 function Logger.warn(player, category, detail)
 	Logger.log(string.format(
 		"WARN %s (%d) [%s] %s",
@@ -135,15 +125,10 @@ function Logger.clear(player)
 	end
 end
 
---// ============================ AIMBOT GUARD ============================
--- Statistical detection. Two heuristics:
---   1. Snap: impossible angle change between consecutive shots.
---   2. Lock: inhuman tracking consistency over many shots.
--- Flag-only BY DESIGN. Feed via Aegis.reportShot(player, aimDirection),
--- or set trackAim in a secured remote's schema to auto-feed a Vector3 arg.
+--// AIMBOT GUARD
 
 local AimbotGuard = {}
-local aimHistory = {} -- [userId] = { {dir = Vector3, t = number}, ... }
+local aimHistory = {}
 local MAX_AIM_HISTORY = 30
 
 local function angleBetween(a, b)
@@ -185,8 +170,6 @@ function AimbotGuard.trackShot(player, aimDir)
 		table.remove(h, 1)
 	end
 
-	-- Inhuman steadiness: 10 consecutive shot pairs all under 1.5 degrees
-	-- apart while firing means the aim is not driven by a human hand.
 	if #h >= 11 then
 		local steady = 0
 		for i = #h - 9, #h do
@@ -201,12 +184,10 @@ function AimbotGuard.trackShot(player, aimDir)
 	end
 end
 
---// ========================== REMOTE VALIDATOR ==========================
--- Validates RemoteEvent traffic server-side: arg types, per-player rate
--- limits, arg size caps (anti-crasher). Invalid calls never reach game logic.
+--// REMOTE VALIDATOR
 
 local RemoteValidator = {}
-local rateBuckets = {} -- ["userId\0RemoteName"] = { timestamps }
+local rateBuckets = {}
 
 local function typeOk(value, expected)
 	if expected == "any" then
@@ -270,7 +251,6 @@ local function resolveSchema(remote, override)
 	return schema
 end
 
--- secure(remote, schema?, handler)
 function RemoteValidator.secure(remote, schemaOverride, handler)
 	if typeof(schemaOverride) == "function" and handler == nil then
 		handler = schemaOverride
@@ -333,14 +313,11 @@ function RemoteValidator.secure(remote, schemaOverride, handler)
 	end)
 end
 
---// ========================== MOVEMENT GUARD ============================
--- Server-side displacement checks. Speed hacks, teleports, TweenService
--- tweens and PivotTo calls ALL change position, so one check catches every
--- method. Legitimate scripted movement must go through Aegis.teleport().
+--// MOVEMENT GUARD
 
 local MovementGuard = {}
-local moveLast = {} -- [userId] = Vector3
-local moveExempt = {} -- [userId] = Vector3 (set by Aegis.teleport)
+local moveLast = {}
+local moveExempt = {}
 
 function MovementGuard.exempt(player, cframe)
 	moveExempt[player.UserId] = cframe.Position
@@ -374,7 +351,6 @@ function MovementGuard.checkAll(cfg)
 			local pos = hrp.Position
 
 			if moveExempt[uid] then
-				-- Whitelisted teleport: snap the baseline, skip the check.
 				moveLast[uid] = moveExempt[uid]
 				moveExempt[uid] = nil
 			elseif cfg.ignoreSeated and humanoid.Seated then
@@ -385,7 +361,6 @@ function MovementGuard.checkAll(cfg)
 					state == Enum.HumanoidStateType.Physics
 					or state == Enum.HumanoidStateType.Dead
 				then
-					-- Game physics or death took over; not the player's doing.
 					moveLast[uid] = pos
 				else
 					local prev = moveLast[uid]
@@ -395,8 +370,6 @@ function MovementGuard.checkAll(cfg)
 						local hDist = Vector3.new(delta.X, 0, delta.Z).Magnitude
 						local vDist = math.abs(delta.Y)
 						local speed = humanoid.WalkSpeed
-						-- Horizontal is strict; vertical gets slack for jumps/falls.
-						-- Real teleports exceed both by orders of magnitude.
 						local hAllowed = (speed * cfg.tolerance) * dt + 2
 						local vAllowed = (speed * cfg.tolerance) * dt + 30
 						if hDist > hAllowed or vDist > vAllowed then
@@ -420,17 +393,11 @@ function MovementGuard.checkAll(cfg)
 	end
 end
 
---// ============================ NOCLIP GUARD ============================
--- Two layers:
---   1. Path raycast: segment from last position to current. Crossing solid
---      (CanCollide) geometry means the player moved through a wall.
---   2. Inside-part check: shrunken bounding box at the character; overlap
---      with solid geometry means the player is embedded in a wall.
--- Floor-like hits (normal pointing up) are ignored: stairs aren't noclip.
+--// NOCLIP GUARD
 
 local NoclipGuard = {}
-local noclipLast = {} -- [userId] = Vector3
-local noclipSkip = {} -- [userId] = true (set by Aegis.teleport)
+local noclipLast = {}
+local noclipSkip = {}
 
 function NoclipGuard.exempt(player)
 	noclipSkip[player.UserId] = true
@@ -475,13 +442,11 @@ function NoclipGuard.checkAll(cfg)
 					params.FilterType = Enum.RaycastFilterType.Exclude
 					params.FilterDescendantsInstances = { character }
 
-					-- Layer 1: did the path cross solid geometry?
 					local dir = pos - prev
 					local hit = Workspace:Raycast(prev, dir, params)
 					if hit and hit.Instance.CanCollide and hit.Normal.Y < 0.7 then
 						Logger.flag(player, "noclip", "crossed " .. hit.Instance:GetFullName())
 					else
-						-- Layer 2: embedded inside solid geometry?
 						local overlap = OverlapParams.new()
 						overlap.FilterType = Enum.RaycastFilterType.Exclude
 						overlap.FilterDescendantsInstances = { character }
@@ -500,7 +465,7 @@ function NoclipGuard.checkAll(cfg)
 	end
 end
 
---// ============================= PUBLIC API =============================
+--// PUBLIC API
 
 local started = false
 
@@ -527,7 +492,7 @@ function Aegis.init(options)
 	Aegis.configure(options)
 	MovementGuard.start()
 	NoclipGuard.start()
-	Logger.log("Aegis v0.1 initialized (single-file)")
+	Logger.log("Aegis v0.1 initialized")
 	return Aegis
 end
 
@@ -537,18 +502,11 @@ local function ensureStarted()
 	end
 end
 
--- Wraps a RemoteEvent with validation. Schema fields:
---   args       = {"number", "Instance", ...}  expected arg types (typeof names, or "any")
---   rateLimit  = {maxCalls, perSeconds}       e.g. {200, 1} for clicker games
---   maxArgSize = number                        max string length / table entries (anti-crasher)
---   trackAim   = true + aimArg = 1             feed a Vector3 arg to the aimbot guard
 function Aegis.secure(remote, schema, handler)
 	ensureStarted()
 	return RemoteValidator.secure(remote, schema, handler)
 end
 
--- Whitelist a legitimate teleport so the movement/noclip guards ignore it.
--- Call this INSTEAD of setting CFrame directly for spawns, portals, etc.
 function Aegis.teleport(player, cframe)
 	ensureStarted()
 	MovementGuard.exempt(player, cframe)
@@ -559,7 +517,6 @@ function Aegis.teleport(player, cframe)
 	end
 end
 
--- Feed a shot's aim direction to the aimbot guard. Call from your weapon code.
 function Aegis.reportShot(player, aimDirection)
 	ensureStarted()
 	AimbotGuard.trackShot(player, aimDirection)
