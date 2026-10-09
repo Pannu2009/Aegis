@@ -63,9 +63,19 @@ One table at the top of the file, documented in the index header. The knobs you'
 - **CombatGuard** — server-side ammo, fire-rate, reload timers, trigger-bot consistency (warn-only)
 - **HitValidator** — kill-aura range checks
 - **SessionGuard** — server-side AFK tracking (server kicks can't be hooked by anti-kick)
+- **InventoryGuard** — atomic give/take/trade with per-player locks, persisted to DataStore on every mutation. Script dupes die on the lock; wifi-freeze dupes die on the immediate save
+- **ShopGuard** — server-side catalog prices, balance-checked buys. Purchase bypasses die here
+- **BehaviorGuard** — farm-bot detection: metronome timing + marathon sessions (warn-only)
 - **Logger** — strikes, kicks, optional Discord webhook
 
 Physics-based checks (movement, noclip, remotes, hits) can't false-positive on skill — a pro player doesn't move faster than physics allows. Only the statistical heuristics (aimbot, fire consistency) can look suspicious, and those never kick, only log.
+
+## Updates
+
+**2026-10-09 ~12:05 PDT** — v0.2: InventoryGuard (dupe-proof atomic transactions), ShopGuard (server-side prices), BehaviorGuard (auto-farm detection)
+**2026-10-09 ~11:50 PDT** — CombatGuard, HitValidator, SessionGuard. Trust list, audit mode, strike thresholds
+**2026-10-09 ~11:35 PDT** — Single-file edition. Index-only header, no inline comments. README rewritten
+**2026-10-09 ~11:20 PDT** — First release: RemoteValidator, MovementGuard, NoclipGuard, AimbotGuard
 
 ## License
 

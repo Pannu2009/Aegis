@@ -1,4 +1,4 @@
---// Aegis v0.1 — open-source anti-exploit kit for Roblox games.
+--// Aegis v0.2 — open-source anti-exploit kit for Roblox games.
 --// One ModuleScript in ServerScriptService. MIT License.
 --// Built by Dakait — https://dakait.lol
 --//
@@ -15,9 +15,14 @@
 --//   CombatGuard ...... registerWeapon/tryFire/reloadWeapon: server-side ammo,
 --//                      fire-rate, reload timers, trigger-bot check (warn-only)
 --//   HitValidator ..... validateHit(): kill-aura range checks
+--//   InventoryGuard ... give/take/trade: atomic, locked, persisted on every
+--//                      mutation (kills script dupes + wifi-freeze dupes)
+--//   ShopGuard ........ server-side catalog prices, balance-checked buys
+--//   BehaviorGuard .... recordAction(): farm-bot timing + marathon heuristics
 --//   Public API ....... init / configure / secure / teleport / reportShot /
 --//                      trust / untrust / registerWeapon / tryFire /
---//                      reloadWeapon / validateHit / ping
+--//                      reloadWeapon / validateHit / ping / giveItem / takeItem /
+--//                      tradeItems / hasItem / setShop / buyItem / recordAction
 --//
 --// Install: paste this whole file into a ModuleScript named "Aegis".
 --// Usage:
@@ -76,6 +81,15 @@ local Config = {
 		enabled = true,
 		consistencyWindow = 10,
 		consistencyTolerance = 0.05,
+	},
+
+	behavior = {
+		enabled = true,
+		consistencyWindow = 20,
+		consistencyTolerance = 0.05,
+		marathonSeconds = 21600,
+		marathonActions = 500,
+		breakReset = 600,
 	},
 }
 
@@ -682,6 +696,255 @@ function HitValidator.validate(player, targetPosition, maxRange)
 	return true
 end
 
+--// INVENTORY GUARD
+
+local InventoryGuard = {}
+local inventories = {}
+local invLocks = {}
+local invStore = nil
+
+function InventoryGuard.setDataStore(ds)
+	invStore = ds
+end
+
+local function invPersist(player)
+	if not invStore then
+		return
+	end
+	local uid = player.UserId
+	local data = inventories[uid] or {}
+	local ok, err = pcall(function()
+		invStore:UpdateAsync("aegis_inv_" .. uid, function()
+			return data
+		end)
+	end)
+	if not ok then
+		Logger.log("inventory persist failed: " .. tostring(err))
+	end
+end
+
+local function acquire(uids)
+	local waited = 0
+	while waited < 5 do
+		local free = true
+		for _, uid in ipairs(uids) do
+			if invLocks[uid] then
+				free = false
+				break
+			end
+		end
+		if free then
+			for _, uid in ipairs(uids) do
+				invLocks[uid] = true
+			end
+			return true
+		end
+		task.wait(0.05)
+		waited += 0.05
+	end
+	return false
+end
+
+local function release(uids)
+	for _, uid in ipairs(uids) do
+		invLocks[uid] = nil
+	end
+end
+
+local function withLock(uids, fn)
+	if not acquire(uids) then
+		return false
+	end
+	local ok, result = pcall(fn)
+	release(uids)
+	if not ok then
+		Logger.log("inventory transaction error: " .. tostring(result))
+		return false
+	end
+	return result
+end
+
+local function getInv(player)
+	local inv = inventories[player.UserId]
+	if not inv then
+		inv = {}
+		inventories[player.UserId] = inv
+	end
+	return inv
+end
+
+function InventoryGuard.load(player, data)
+	inventories[player.UserId] = data or {}
+end
+
+function InventoryGuard.start()
+	Players.PlayerRemoving:Connect(function(player)
+		inventories[player.UserId] = nil
+		invLocks[player.UserId] = nil
+	end)
+end
+
+function InventoryGuard.get(player)
+	local copy = {}
+	for k, v in pairs(getInv(player)) do
+		copy[k] = v
+	end
+	return copy
+end
+
+function InventoryGuard.has(player, itemId, amount)
+	return (getInv(player)[itemId] or 0) >= (amount or 1)
+end
+
+function InventoryGuard.give(player, itemId, amount)
+	amount = amount or 1
+	return withLock({ player.UserId }, function()
+		local inv = getInv(player)
+		inv[itemId] = (inv[itemId] or 0) + amount
+		invPersist(player)
+		return true
+	end)
+end
+
+function InventoryGuard.take(player, itemId, amount)
+	amount = amount or 1
+	return withLock({ player.UserId }, function()
+		local inv = getInv(player)
+		if (inv[itemId] or 0) < amount then
+			return false
+		end
+		inv[itemId] -= amount
+		if inv[itemId] <= 0 then
+			inv[itemId] = nil
+		end
+		invPersist(player)
+		return true
+	end)
+end
+
+function InventoryGuard.trade(fromPlayer, toPlayer, itemId, amount)
+	amount = amount or 1
+	local first, second = fromPlayer, toPlayer
+	if fromPlayer.UserId > toPlayer.UserId then
+		first, second = toPlayer, fromPlayer
+	end
+	return withLock({ first.UserId, second.UserId }, function()
+		local fromInv = getInv(fromPlayer)
+		if (fromInv[itemId] or 0) < amount then
+			Logger.flag(fromPlayer, "dupe", "trade without owning " .. tostring(itemId))
+			return false
+		end
+		fromInv[itemId] -= amount
+		if fromInv[itemId] <= 0 then
+			fromInv[itemId] = nil
+		end
+		local toInv = getInv(toPlayer)
+		toInv[itemId] = (toInv[itemId] or 0) + amount
+		invPersist(fromPlayer)
+		invPersist(toPlayer)
+		return true
+	end)
+end
+
+--// SHOP GUARD
+
+local ShopGuard = {}
+local catalog = {}
+
+function ShopGuard.setCatalog(c)
+	catalog = c or {}
+end
+
+function ShopGuard.buy(player, itemId)
+	local entry = catalog[itemId]
+	if not entry then
+		Logger.flag(player, "shop", "buy unknown item: " .. tostring(itemId))
+		return false
+	end
+	if not InventoryGuard.take(player, entry.currency or "coins", entry.price) then
+		return false
+	end
+	InventoryGuard.give(player, itemId, 1)
+	return true
+end
+
+--// BEHAVIOR GUARD
+
+local BehaviorGuard = {}
+local actionStreams = {}
+local actionSessions = {}
+
+function BehaviorGuard.start()
+	Players.PlayerRemoving:Connect(function(player)
+		actionSessions[player.UserId] = nil
+		local prefix = player.UserId .. "\0"
+		for k in pairs(actionStreams) do
+			if k:sub(1, #prefix) == prefix then
+				actionStreams[k] = nil
+			end
+		end
+	end)
+end
+
+function BehaviorGuard.record(player, action)
+	if not Config.behavior.enabled then
+		return
+	end
+	if isTrusted(player) then
+		return
+	end
+	local cfg = Config.behavior
+	local now = os.clock()
+	local uid = player.UserId
+
+	local sess = actionSessions[uid]
+	if not sess or now - sess.last > cfg.breakReset then
+		sess = { start = now, last = now, actions = 0 }
+		actionSessions[uid] = sess
+	end
+	sess.last = now
+	sess.actions += 1
+	if sess.actions >= cfg.marathonActions and now - sess.start >= cfg.marathonSeconds then
+		Logger.warn(player, "autofarm", "marathon: " .. sess.actions .. " actions")
+		actionSessions[uid] = nil
+	end
+
+	local key = uid .. "\0" .. action
+	local s = actionStreams[key]
+	if not s then
+		s = {}
+		actionStreams[key] = s
+	end
+	table.insert(s, now)
+	if #s > 120 then
+		table.remove(s, 1)
+	end
+	if #s >= cfg.consistencyWindow + 1 then
+		local intervals = {}
+		for i = #s - cfg.consistencyWindow + 1, #s do
+			table.insert(intervals, s[i] - s[i - 1])
+		end
+		local avg = 0
+		for _, v in ipairs(intervals) do
+			avg += v
+		end
+		avg /= #intervals
+		if avg > 0.05 then
+			local consistent = true
+			for _, v in ipairs(intervals) do
+				if math.abs(v - avg) / avg > cfg.consistencyTolerance then
+					consistent = false
+					break
+				end
+			end
+			if consistent then
+				Logger.warn(player, "autofarm", action .. ": metronome timing")
+				actionStreams[key] = {}
+			end
+		end
+	end
+end
+
 --// PUBLIC API
 
 local started = false
@@ -711,7 +974,9 @@ function Aegis.init(options)
 	NoclipGuard.start()
 	SessionGuard.start()
 	CombatGuard.start()
-	Logger.log("Aegis v0.1 initialized")
+	InventoryGuard.start()
+	BehaviorGuard.start()
+	Logger.log("Aegis v0.2 initialized")
 	return Aegis
 end
 
@@ -772,6 +1037,54 @@ end
 function Aegis.ping(player)
 	ensureStarted()
 	SessionGuard.ping(player)
+end
+
+function Aegis.setDataStore(ds)
+	InventoryGuard.setDataStore(ds)
+end
+
+function Aegis.loadInventory(player, data)
+	ensureStarted()
+	InventoryGuard.load(player, data)
+end
+
+function Aegis.getInventory(player)
+	ensureStarted()
+	return InventoryGuard.get(player)
+end
+
+function Aegis.hasItem(player, itemId, amount)
+	ensureStarted()
+	return InventoryGuard.has(player, itemId, amount)
+end
+
+function Aegis.giveItem(player, itemId, amount)
+	ensureStarted()
+	return InventoryGuard.give(player, itemId, amount)
+end
+
+function Aegis.takeItem(player, itemId, amount)
+	ensureStarted()
+	return InventoryGuard.take(player, itemId, amount)
+end
+
+function Aegis.tradeItems(fromPlayer, toPlayer, itemId, amount)
+	ensureStarted()
+	return InventoryGuard.trade(fromPlayer, toPlayer, itemId, amount)
+end
+
+function Aegis.setShop(catalog)
+	ShopGuard.setCatalog(catalog)
+end
+
+function Aegis.buyItem(player, itemId)
+	ensureStarted()
+	return ShopGuard.buy(player, itemId)
+end
+
+function Aegis.recordAction(player, action)
+	ensureStarted()
+	BehaviorGuard.record(player, action)
 end
 
 Aegis.Config = Config
