@@ -9,7 +9,8 @@
 --//   Trust ............ Aegis.trust(): exempt staff/testers from all guards
 --//   AimbotGuard ...... trackShot(): snap angles + tracking consistency, flag-only
 --//   SessionGuard ..... server-side AFK tracking (server kicks can't be hooked)
---//   RemoteValidator .. secure(): arg types, rate limits, arg size caps
+--//   RemoteValidator .. secure()/secureFunction(): arg types, rate limits,
+--//                      arg size caps (events + functions)
 --//   MovementGuard .... displacement checks: speed, teleport, tween, pivot
 --//   NoclipGuard ...... path raycasts + inside-geometry checks
 --//   CombatGuard ...... registerWeapon/tryFire/reloadWeapon: server-side ammo,
@@ -19,8 +20,8 @@
 --//                      mutation (kills script dupes + wifi-freeze dupes)
 --//   ShopGuard ........ server-side catalog prices, balance-checked buys
 --//   BehaviorGuard .... recordAction(): farm-bot timing + marathon heuristics
---//   Public API ....... init / configure / secure / teleport / reportShot /
---//                      trust / untrust / registerWeapon / tryFire /
+--//   Public API ....... init / configure / secure / secureFunction / teleport /
+--//                      reportShot / trust / untrust / registerWeapon / tryFire /
 --//                      reloadWeapon / validateHit / ping / giveItem / takeItem /
 --//                      tradeItems / hasItem / setShop / buyItem / recordAction
 --//
@@ -409,6 +410,69 @@ function RemoteValidator.secure(remote, schemaOverride, handler)
 			Logger.log("handler error in " .. remote.Name .. ": " .. tostring(err))
 		end
 	end)
+end
+
+function RemoteValidator.secureFunction(rf, schemaOverride, handler)
+	if typeof(schemaOverride) == "function" and handler == nil then
+		handler = schemaOverride
+		schemaOverride = nil
+	end
+	assert(typeof(handler) == "function", "Aegis.secureFunction: handler must be a function")
+
+	local schema = resolveSchema(rf, schemaOverride)
+
+	rf.OnServerInvoke = function(player, ...)
+		if isTrusted(player) then
+			return handler(player, ...)
+		end
+
+		local args = { ... }
+
+		if not rateOk(player, rf.Name, schema.rateLimit) then
+			Logger.flag(player, "remote-spam", rf.Name)
+			return nil
+		end
+
+		if #args > #schema.args then
+			Logger.flag(player, "remote-args", rf.Name .. ": too many args")
+			return nil
+		end
+
+		for i, expected in ipairs(schema.args) do
+			local v = args[i]
+			if v == nil and expected ~= "nil" then
+				Logger.flag(player, "remote-args", rf.Name .. ": missing arg " .. i)
+				return nil
+			end
+			if not typeOk(v, expected) then
+				Logger.flag(
+					player,
+					"remote-args",
+					string.format(
+						"%s: arg %d expected %s, got %s",
+						rf.Name,
+						i,
+						expected,
+						typeof(v)
+					)
+				)
+				return nil
+			end
+			if not sizeOk(v, schema.maxArgSize) then
+				Logger.flag(player, "remote-crasher", rf.Name .. ": oversized arg " .. i)
+				return nil
+			end
+		end
+
+		SessionGuard.ping(player)
+
+		local results = { pcall(handler, player, ...) }
+		if not results[1] then
+			Logger.log("handler error in " .. rf.Name .. ": " .. tostring(results[2]))
+			return nil
+		end
+		return table.unpack(results, 2)
+	end
 end
 
 --// MOVEMENT GUARD
@@ -1016,6 +1080,11 @@ end
 function Aegis.secure(remote, schema, handler)
 	ensureStarted()
 	return RemoteValidator.secure(remote, schema, handler)
+end
+
+function Aegis.secureFunction(rf, schema, handler)
+	ensureStarted()
+	return RemoteValidator.secureFunction(rf, schema, handler)
 end
 
 function Aegis.teleport(player, cframe)
