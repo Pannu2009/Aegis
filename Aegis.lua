@@ -432,6 +432,16 @@ function MovementGuard.start()
 			MovementGuard.checkAll(cfg)
 		end
 	end)
+	local function watchPlayer(player)
+		player.CharacterAdded:Connect(function()
+			moveLast[player.UserId] = nil
+			moveExempt[player.UserId] = nil
+		end)
+	end
+	Players.PlayerAdded:Connect(watchPlayer)
+	for _, player in ipairs(Players:GetPlayers()) do
+		watchPlayer(player)
+	end
 	Players.PlayerRemoving:Connect(function(player)
 		moveLast[player.UserId] = nil
 		moveExempt[player.UserId] = nil
@@ -512,6 +522,16 @@ function NoclipGuard.start()
 			NoclipGuard.checkAll(cfg)
 		end
 	end)
+	local function watchPlayer(player)
+		player.CharacterAdded:Connect(function()
+			noclipLast[player.UserId] = nil
+			noclipSkip[player.UserId] = nil
+		end)
+	end
+	Players.PlayerAdded:Connect(watchPlayer)
+	for _, player in ipairs(Players:GetPlayers()) do
+		watchPlayer(player)
+	end
 	Players.PlayerRemoving:Connect(function(player)
 		noclipLast[player.UserId] = nil
 		noclipSkip[player.UserId] = nil

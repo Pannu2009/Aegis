@@ -72,7 +72,8 @@ Physics-based checks (movement, noclip, remotes, hits) can't false-positive on s
 
 ## Updates
 
-**2026-10-09 ~12:05 PDT** — v0.2: InventoryGuard (dupe-proof atomic transactions), ShopGuard (server-side prices), BehaviorGuard (auto-farm detection)
+**2026-10-09 ~12:00 PDT** — Fixed respawn false-positive in movement/noclip guards
+**2026-10-09 ~11:55 PDT** — v0.2: InventoryGuard (dupe-proof atomic transactions), ShopGuard (server-side prices), BehaviorGuard (auto-farm detection)
 **2026-10-09 ~11:50 PDT** — CombatGuard, HitValidator, SessionGuard. Trust list, audit mode, strike thresholds
 **2026-10-09 ~11:20 PDT** — First release: RemoteValidator, MovementGuard, NoclipGuard, AimbotGuard
 
