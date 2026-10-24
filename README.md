@@ -71,11 +71,14 @@ One table at the top of the file, documented in the index header. The knobs you'
 - **Logger** — strikes (with decay, so old flags fade), kicks, Discord webhook with event-only posting + rate guard
 - **HoneypotGuard** — decoy remotes (`GiveAdmin`, `FreeRewards`, ...) no legit client ever fires. Any call is a certain flag, zero false positives
 - **BanGuard** — opt-in timed bans with expiry, persisted in a DataStore, checked on join
+- **v0.5 additions** — movement rollback (snap-back to last legal position), fly/hover + fling detection, player-arg binding, idempotent shop receipts, escalation ladder (warn → kick → timed ban → perm), cross-server strikes via MemoryStore, honeypot items, evidence snapshots on flags, webhook embeds + digest mode, `Aegis.selfTest()` (Studio verification), adaptive behavior baselines, presets (`audit`/`casual`/`strict`), optional client companion tripwire (`AegisClient.lua`)
 - **sanitizeData** — deep-clean values before DataStore saves; one NaN leaf can't fail the whole save anymore
 
 Physics-based checks (movement, noclip, remotes, hits) can't false-positive on skill — a pro player doesn't move faster than physics allows. Only the statistical heuristics (aimbot, fire consistency) can look suspicious, and those never kick, only log.
 
 ## Updates
+
+**2026-10-24** — v0.5: all 15 — movement rollback (snap-back to last legal position), fly/hover detection, fling detection (horizontal velocity), `validInstance` + `WorkspaceInstance` schema type, player-arg binding (anti-impersonation), idempotent shop receipts, escalation ladder (warn → kick → timed ban → perm, bans opt-in), cross-server strikes (MemoryStore), honeypot items (possession = certain exploit), evidence snapshots on every flag (position/velocity/recent calls), webhook embeds + digest mode, `Aegis.selfTest()` dev verification, BehaviorGuard adaptive baselines (CV-based bot timing), optional client companion tripwire (`AegisClient.lua`, never sole evidence), presets (`audit`/`casual`/`strict`). Every new enforcement respects `auditOnly`; bug-check session passed: full-file syntax parse, all 32 public API functions present, all Config defaults present, audit gates verified.
 
 **2026-10-23** — v0.4: HoneypotGuard decoy remotes, BanGuard timed bans (opt-in), global remote rate budget, strike decay, `Aegis.sanitizeData`. v0.3 (same day): finiteness validation in the remote validator, inventory sanitization, webhook event posting + rate guard, rate-bucket cleanup
 
