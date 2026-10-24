@@ -1,4 +1,4 @@
---// Aegis v0.2 — open-source anti-exploit kit for Roblox games.
+--// Aegis v0.4 — open-source anti-exploit kit for Roblox games.
 --// One ModuleScript in ServerScriptService. MIT License.
 --// Built by Dakait — https://dakait.lol
 --//
@@ -32,6 +32,8 @@
 --//   Aegis.secure(remote, { args = {"number"} }, function(player, ...) end)
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DataStoreService = game:GetService("DataStoreService")
 local Workspace = game:GetService("Workspace")
 local HttpService = game:GetService("HttpService")
 
@@ -43,6 +45,21 @@ local Config = {
 	kickOnDetect = true,
 	flagThreshold = 3,
 	discordWebhook = "",
+	webhookVerbose = false,
+	webhookMinInterval = 1.5,
+	strikeDecaySeconds = 600,
+
+	globalRate = { 150, 1 },
+
+	honeypot = {
+		enabled = true,
+		names = { "GiveAdmin", "FreeRewards", "AddCoins", "GrantItem", "SetLevel" },
+	},
+
+	bans = {
+		enabled = false,
+		storeName = "aegis_bans_v1",
+	},
 	auditOnly = false,
 
 	remoteDefaults = {
@@ -99,9 +116,22 @@ local Config = {
 local Logger = {}
 local strikes = {}
 
+local webhookLastPost = 0
+local webhookSuppressed = 0
+
 local function sendWebhook(message)
 	if Config.discordWebhook == "" then
 		return
+	end
+	local now = os.clock()
+	if now - webhookLastPost < Config.webhookMinInterval then
+		webhookSuppressed += 1
+		return
+	end
+	webhookLastPost = now
+	if webhookSuppressed > 0 then
+		message = message .. " (+" .. webhookSuppressed .. " more suppressed)"
+		webhookSuppressed = 0
 	end
 	task.spawn(function()
 		pcall(function()
@@ -115,14 +145,27 @@ end
 
 function Logger.log(message)
 	print("[Aegis] " .. message)
+	if Config.webhookVerbose then
+		sendWebhook(message)
+	end
+end
+
+local function logEvent(message)
+	print("[Aegis] " .. message)
 	sendWebhook(message)
 end
 
 function Logger.flag(player, category, detail)
 	local key = player.UserId .. ":" .. category
-	strikes[key] = (strikes[key] or 0) + 1
-	local count = strikes[key]
-	Logger.log(string.format(
+	local entry = strikes[key]
+	if not entry or os.clock() - entry.last > Config.strikeDecaySeconds then
+		entry = { n = 0, last = 0 }
+	end
+	entry.n += 1
+	entry.last = os.clock()
+	strikes[key] = entry
+	local count = entry.n
+	logEvent(string.format(
 		"FLAG %s (%d) [%s] %s (strike %d)",
 		player.Name,
 		player.UserId,
@@ -141,7 +184,7 @@ function Logger.flag(player, category, detail)
 end
 
 function Logger.warn(player, category, detail)
-	Logger.log(string.format(
+	logEvent(string.format(
 		"WARN %s (%d) [%s] %s",
 		player.Name,
 		player.UserId,
@@ -151,7 +194,7 @@ function Logger.warn(player, category, detail)
 end
 
 function Logger.kick(player, reason)
-	Logger.log("KICK " .. player.Name .. " (" .. player.UserId .. ") — " .. reason)
+	logEvent("KICK " .. player.Name .. " (" .. player.UserId .. ") — " .. reason)
 	player:Kick(reason)
 end
 
@@ -285,6 +328,41 @@ local function typeOk(value, expected)
 	return typeof(value) == expected
 end
 
+-- Finiteness is a separate check from type: a NaN still has
+-- typeof "number", and a Vector3 can carry NaN components --
+-- and NaN makes every magnitude/range comparison downstream
+-- come back false, so range checks PASS on garbage. Reject
+-- non-finite numbers anywhere in an argument, tables included
+-- (depth-capped; sizeOk separately caps table breadth).
+local function finiteOk(value, depth)
+	local t = typeof(value)
+	if t == "number" then
+		return value == value and value ~= math.huge and value ~= -math.huge
+	elseif t == "Vector3" then
+		return value.X == value.X and value.Y == value.Y and value.Z == value.Z
+			and math.abs(value.X) < 1e9 and math.abs(value.Y) < 1e9 and math.abs(value.Z) < 1e9
+	elseif t == "CFrame" then
+		local c = { value:GetComponents() }
+		for i = 1, 12 do
+			if c[i] ~= c[i] then
+				return false
+			end
+		end
+		return true
+	elseif t == "table" then
+		depth = depth or 0
+		if depth >= 4 then
+			return true
+		end
+		for k, v in pairs(value) do
+			if not finiteOk(k, depth + 1) or not finiteOk(v, depth + 1) then
+				return false
+			end
+		end
+	end
+	return true
+end
+
 local function sizeOk(value, maxSize)
 	if typeof(value) == "string" then
 		return #value <= maxSize
@@ -316,6 +394,23 @@ local function rateOk(player, remoteName, limit)
 	end
 	table.insert(kept, now)
 	return true
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	local prefix = player.UserId .. "\0"
+	for key in pairs(rateBuckets) do
+		if key:sub(1, #prefix) == prefix then
+			rateBuckets[key] = nil
+		end
+	end
+end)
+
+local function globalRateOk(player)
+	local limit = Config.globalRate
+	if not limit or not limit[1] or limit[1] <= 0 then
+		return true
+	end
+	return rateOk(player, "__global", limit)
 end
 
 local function resolveSchema(remote, override)
@@ -360,6 +455,11 @@ function RemoteValidator.secure(remote, schemaOverride, handler)
 
 		local args = { ... }
 
+		if not globalRateOk(player) then
+			Logger.flag(player, "remote-spam", remote.Name .. " (global budget)")
+			return
+		end
+
 		if not rateOk(player, remote.Name, schema.rateLimit) then
 			Logger.flag(player, "remote-spam", remote.Name)
 			return
@@ -372,7 +472,14 @@ function RemoteValidator.secure(remote, schemaOverride, handler)
 
 		for i, expected in ipairs(schema.args) do
 			local v = args[i]
-			if v == nil and expected ~= "nil" then
+			local optional = expected:sub(-1) == "?"
+			if optional then
+				expected = expected:sub(1, -2)
+			end
+			if v == nil then
+				if optional or expected == "nil" then
+					continue
+				end
 				Logger.flag(player, "remote-args", remote.Name .. ": missing arg " .. i)
 				return
 			end
@@ -388,6 +495,10 @@ function RemoteValidator.secure(remote, schemaOverride, handler)
 						typeof(v)
 					)
 				)
+				return
+			end
+			if not finiteOk(v) then
+				Logger.flag(player, "remote-args", remote.Name .. ": non-finite arg " .. i)
 				return
 			end
 			if not sizeOk(v, schema.maxArgSize) then
@@ -428,6 +539,11 @@ function RemoteValidator.secureFunction(rf, schemaOverride, handler)
 
 		local args = { ... }
 
+		if not globalRateOk(player) then
+			Logger.flag(player, "remote-spam", rf.Name .. " (global budget)")
+			return nil
+		end
+
 		if not rateOk(player, rf.Name, schema.rateLimit) then
 			Logger.flag(player, "remote-spam", rf.Name)
 			return nil
@@ -440,7 +556,14 @@ function RemoteValidator.secureFunction(rf, schemaOverride, handler)
 
 		for i, expected in ipairs(schema.args) do
 			local v = args[i]
-			if v == nil and expected ~= "nil" then
+			local optional = expected:sub(-1) == "?"
+			if optional then
+				expected = expected:sub(1, -2)
+			end
+			if v == nil then
+				if optional or expected == "nil" then
+					continue
+				end
 				Logger.flag(player, "remote-args", rf.Name .. ": missing arg " .. i)
 				return nil
 			end
@@ -456,6 +579,10 @@ function RemoteValidator.secureFunction(rf, schemaOverride, handler)
 						typeof(v)
 					)
 				)
+				return nil
+			end
+			if not finiteOk(v) then
+				Logger.flag(player, "remote-args", rf.Name .. ": non-finite arg " .. i)
 				return nil
 			end
 			if not sizeOk(v, schema.maxArgSize) then
@@ -854,6 +981,36 @@ local function withLock(uids, fn)
 	return result
 end
 
+-- Amounts and stored values are sanitized at every boundary:
+-- a NaN or infinite count poisons every comparison it touches
+-- and cannot be JSON-encoded for the DataStore, so it must
+-- never enter (or survive in) an inventory. Bad amounts floor
+-- to a minimum of 1 for forgiving callers, but a poisoned
+-- STORED value reads as 0 and is overwritten on next mutation.
+local MAX_STACK = 1e12
+
+local function cleanAmount(amount)
+	if typeof(amount) ~= "number" or amount ~= amount
+		or amount == math.huge or amount == -math.huge
+	then
+		return 1
+	end
+	return math.clamp(math.floor(amount), 1, MAX_STACK)
+end
+
+local function cleanStored(value)
+	if typeof(value) ~= "number" or value ~= value
+		or value == math.huge or value == -math.huge or value < 0
+	then
+		return 0
+	end
+	return math.min(math.floor(value), MAX_STACK)
+end
+
+local function validItemId(itemId)
+	return typeof(itemId) == "string" or typeof(itemId) == "number"
+end
+
 local function getInv(player)
 	local inv = inventories[player.UserId]
 	if not inv then
@@ -864,7 +1021,18 @@ local function getInv(player)
 end
 
 function InventoryGuard.load(player, data)
-	inventories[player.UserId] = data or {}
+	local clean = {}
+	if typeof(data) == "table" then
+		for itemId, value in pairs(data) do
+			if validItemId(itemId) then
+				local n = cleanStored(value)
+				if n > 0 then
+					clean[itemId] = n
+				end
+			end
+		end
+	end
+	inventories[player.UserId] = clean
 end
 
 function InventoryGuard.start()
@@ -883,28 +1051,37 @@ function InventoryGuard.get(player)
 end
 
 function InventoryGuard.has(player, itemId, amount)
-	amount = math.max(1, math.floor(amount or 1))
-	return (getInv(player)[itemId] or 0) >= amount
+	if not validItemId(itemId) then
+		return false
+	end
+	amount = cleanAmount(amount or 1)
+	return cleanStored(getInv(player)[itemId]) >= amount
 end
 
 function InventoryGuard.give(player, itemId, amount)
-	amount = math.max(1, math.floor(amount or 1))
+	if not validItemId(itemId) then
+		return false
+	end
+	amount = cleanAmount(amount or 1)
 	return withLock({ player.UserId }, function()
 		local inv = getInv(player)
-		inv[itemId] = (inv[itemId] or 0) + amount
+		inv[itemId] = math.min(cleanStored(inv[itemId]) + amount, MAX_STACK)
 		invPersist(player)
 		return true
 	end)
 end
 
 function InventoryGuard.take(player, itemId, amount)
-	amount = math.max(1, math.floor(amount or 1))
+	if not validItemId(itemId) then
+		return false
+	end
+	amount = cleanAmount(amount or 1)
 	return withLock({ player.UserId }, function()
 		local inv = getInv(player)
-		if (inv[itemId] or 0) < amount then
+		if cleanStored(inv[itemId]) < amount then
 			return false
 		end
-		inv[itemId] -= amount
+		inv[itemId] = cleanStored(inv[itemId]) - amount
 		if inv[itemId] <= 0 then
 			inv[itemId] = nil
 		end
@@ -914,23 +1091,26 @@ function InventoryGuard.take(player, itemId, amount)
 end
 
 function InventoryGuard.trade(fromPlayer, toPlayer, itemId, amount)
-	amount = math.max(1, math.floor(amount or 1))
+	if not validItemId(itemId) then
+		return false
+	end
+	amount = cleanAmount(amount or 1)
 	local first, second = fromPlayer, toPlayer
 	if fromPlayer.UserId > toPlayer.UserId then
 		first, second = toPlayer, fromPlayer
 	end
 	return withLock({ first.UserId, second.UserId }, function()
 		local fromInv = getInv(fromPlayer)
-		if (fromInv[itemId] or 0) < amount then
+		if cleanStored(fromInv[itemId]) < amount then
 			Logger.flag(fromPlayer, "dupe", "trade without owning " .. tostring(itemId))
 			return false
 		end
-		fromInv[itemId] -= amount
+		fromInv[itemId] = cleanStored(fromInv[itemId]) - amount
 		if fromInv[itemId] <= 0 then
 			fromInv[itemId] = nil
 		end
 		local toInv = getInv(toPlayer)
-		toInv[itemId] = (toInv[itemId] or 0) + amount
+		toInv[itemId] = math.min(cleanStored(toInv[itemId]) + amount, MAX_STACK)
 		invPersist(fromPlayer)
 		invPersist(toPlayer)
 		return true
@@ -1050,6 +1230,144 @@ local function deepMerge(dst, src)
 	end
 end
 
+--// HONEYPOT GUARD
+-- Decoy remotes no legitimate client ever fires (they are not
+-- in the game's real remote list -- an exploiter enumerating
+-- ReplicatedStorage finds them and cannot resist). Any call is
+-- a certain flag: zero false positives by construction.
+
+local HoneypotGuard = {}
+
+function HoneypotGuard.start()
+	if not Config.honeypot.enabled then
+		return
+	end
+	local folder = ReplicatedStorage:FindFirstChild("Remotes")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "Remotes"
+		folder.Parent = ReplicatedStorage
+	end
+	for _, name in ipairs(Config.honeypot.names) do
+		if not folder:FindFirstChild(name) then
+			local decoy = Instance.new("RemoteEvent")
+			decoy.Name = name
+			decoy.Parent = folder
+			decoy.OnServerEvent:Connect(function(player)
+				Logger.flag(player, "honeypot", name)
+			end)
+		end
+	end
+end
+
+--// BAN GUARD
+-- Timed bans with expiry, persisted in a DataStore. Checked on
+-- join; banned players are kicked with the reason. Opt-in:
+-- Config.bans.enabled (off by default -- a kit should not start
+-- banning people because someone pasted it in).
+
+local BanGuard = {}
+local banStore = nil
+
+local function banStoreReady()
+	if banStore then
+		return true
+	end
+	local ok, store = pcall(function()
+		return DataStoreService:GetDataStore(Config.bans.storeName)
+	end)
+	if ok then
+		banStore = store
+	end
+	return banStore ~= nil
+end
+
+function BanGuard.ban(userId, durationSeconds, reason)
+	if not banStoreReady() then
+		return false
+	end
+	local record = {
+		untilAt = os.time() + math.max(60, math.floor(durationSeconds or 3600)),
+		reason = tostring(reason or "banned"),
+	}
+	local ok = pcall(function()
+		banStore:SetAsync("ban_" .. userId, record)
+	end)
+	if ok then
+		local player = Players:GetPlayerByUserId(userId)
+		if player then
+			Logger.kick(player, "Banned: " .. record.reason)
+		end
+	end
+	return ok
+end
+
+function BanGuard.unban(userId)
+	if not banStoreReady() then
+		return false
+	end
+	return pcall(function()
+		banStore:RemoveAsync("ban_" .. userId)
+	end)
+end
+
+function BanGuard.check(player)
+	if not banStoreReady() then
+		return
+	end
+	local ok, record = pcall(function()
+		return banStore:GetAsync("ban_" .. player.UserId)
+	end)
+	if ok and typeof(record) == "table" and typeof(record.untilAt) == "number" then
+		if record.untilAt > os.time() then
+			Logger.kick(player, "Banned: " .. tostring(record.reason or ""))
+		else
+			BanGuard.unban(player.UserId)
+		end
+	end
+end
+
+function BanGuard.start()
+	if not Config.bans.enabled then
+		return
+	end
+	Players.PlayerAdded:Connect(BanGuard.check)
+	for _, player in ipairs(Players:GetPlayers()) do
+		task.spawn(BanGuard.check, player)
+	end
+end
+
+-- Deep-clean a value for DataStore saving: NaN/inf numbers
+-- become 0 (JSON cannot encode them and one poisoned leaf
+-- fails the whole save), non-serializable values are dropped,
+-- tables are copied (depth-capped). Use before SetAsync.
+local function sanitizeData(value, depth)
+	depth = depth or 0
+	local t = typeof(value)
+	if t == "number" then
+		if value ~= value or value == math.huge or value == -math.huge then
+			return 0
+		end
+		return value
+	elseif t == "string" or t == "boolean" then
+		return value
+	elseif t == "table" then
+		if depth >= 8 then
+			return nil
+		end
+		local out = {}
+		for k, v in pairs(value) do
+			local keyOk = typeof(k) == "string" or typeof(k) == "number"
+			local cleaned = sanitizeData(v, depth + 1)
+			if keyOk and cleaned ~= nil then
+				out[k] = cleaned
+			end
+		end
+		return out
+	end
+	return nil
+end
+
 function Aegis.configure(overrides)
 	deepMerge(Config, overrides or {})
 	return Aegis
@@ -1067,7 +1385,9 @@ function Aegis.init(options)
 	CombatGuard.start()
 	InventoryGuard.start()
 	BehaviorGuard.start()
-	Logger.log("Aegis v0.2 initialized")
+	HoneypotGuard.start()
+	BanGuard.start()
+	Logger.log("Aegis v0.4 initialized")
 	return Aegis
 end
 
@@ -1133,6 +1453,20 @@ end
 function Aegis.ping(player)
 	ensureStarted()
 	SessionGuard.ping(player)
+end
+
+function Aegis.ban(userId, durationSeconds, reason)
+	ensureStarted()
+	return BanGuard.ban(userId, durationSeconds, reason)
+end
+
+function Aegis.unban(userId)
+	ensureStarted()
+	return BanGuard.unban(userId)
+end
+
+function Aegis.sanitizeData(value)
+	return sanitizeData(value)
 end
 
 function Aegis.setDataStore(ds)

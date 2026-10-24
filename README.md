@@ -58,21 +58,26 @@ One table at the top of the file, documented in the index header. The knobs you'
 
 ## Inside
 
-- **RemoteValidator** — arg types, rate limits, oversized payloads (the stuff that crashes servers)
+- **RemoteValidator** — arg types (including optional `"Vector3?"` args), rate limits per remote AND a global per-player budget, oversized payloads, and deep finiteness checks: a NaN passes a type check but fails every range check downstream, so non-finite numbers/Vectors/CFrames are rejected at the door
 - **MovementGuard** — displacement-based. Speed, teleport, TweenService, PivotTo — all move the character, one check catches them
 - **NoclipGuard** — path raycasts + inside-geometry checks
 - **AimbotGuard** — snap detection, tracking consistency, flag-only
 - **CombatGuard** — server-side ammo, fire-rate, reload timers, trigger-bot consistency (warn-only)
 - **HitValidator** — kill-aura range checks
 - **SessionGuard** — server-side AFK tracking (server kicks can't be hooked by anti-kick)
-- **InventoryGuard** — atomic give/take/trade with per-player locks, persisted to DataStore on every mutation. Script dupes die on the lock; wifi-freeze dupes die on the immediate save
+- **InventoryGuard** — atomic give/take/trade with per-player locks (single-server), persisted to DataStore on every mutation. All amounts and stored values are sanitized — NaN/inf/poisoned counts can never enter or survive. Script dupes die on the lock; wifi-freeze dupes die on the immediate save
 - **ShopGuard** — server-side catalog prices, balance-checked buys. Purchase bypasses die here
 - **BehaviorGuard** — farm-bot detection: metronome timing + marathon sessions (warn-only)
-- **Logger** — strikes, kicks, optional Discord webhook
+- **Logger** — strikes (with decay, so old flags fade), kicks, Discord webhook with event-only posting + rate guard
+- **HoneypotGuard** — decoy remotes (`GiveAdmin`, `FreeRewards`, ...) no legit client ever fires. Any call is a certain flag, zero false positives
+- **BanGuard** — opt-in timed bans with expiry, persisted in a DataStore, checked on join
+- **sanitizeData** — deep-clean values before DataStore saves; one NaN leaf can't fail the whole save anymore
 
 Physics-based checks (movement, noclip, remotes, hits) can't false-positive on skill — a pro player doesn't move faster than physics allows. Only the statistical heuristics (aimbot, fire consistency) can look suspicious, and those never kick, only log.
 
 ## Updates
+
+**2026-10-23** — v0.4: HoneypotGuard decoy remotes, BanGuard timed bans (opt-in), global remote rate budget, strike decay, `Aegis.sanitizeData`. v0.3 (same day): finiteness validation in the remote validator, inventory sanitization, webhook event posting + rate guard, rate-bucket cleanup
 
 **2026-10-09 ~12:20 PDT** — secureFunction: RemoteFunction validation (dogfooding in Pumpkin Defense)
 **2026-10-09 ~12:15 PDT** — Fixed negative-amount item duplication in inventory API, combat enabled flag
